@@ -608,6 +608,10 @@ static int hal_enc_create_channel_new(int chn, const rss_video_config_t *cfg)
                 chnAttr.rcAttr.attrRcMode.attrCbr.uTargetBitRate = br_kbps;
                 chnAttr.rcAttr.attrRcMode.attrCbr.uMaxPictureSize = br_kbps;
             }
+            if (cfg->ip_delta >= 0)
+                chnAttr.rcAttr.attrRcMode.attrCbr.iIPDelta = cfg->ip_delta;
+            if (cfg->pb_delta >= 0)
+                chnAttr.rcAttr.attrRcMode.attrCbr.iPBDelta = cfg->pb_delta;
             break;
 
         case IMP_ENC_RC_MODE_VBR:
