@@ -553,6 +553,7 @@ typedef enum {
     RSS_NS_MODERATE = 1,
     RSS_NS_HIGH = 2,
     RSS_NS_VERYHIGH = 3,
+    RSS_NS_MUSIC = 4,
 } rss_ns_level_t;
 
 /* Pipeline device ID */

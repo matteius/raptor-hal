@@ -256,7 +256,7 @@ int hal_audio_set_gain(void *ctx, int dev, int chn, int gain)
  *
  * IMP_AI_EnableNs(IMPAudioIOAttr *attr, int mode)
  *   - attr: audio IO attributes (the SDK needs them for NS init)
- *   - mode: Level_ns enum [0..3]
+ *   - mode: Level_ns enum [0..3], or OpenIMP music/video extension 4
  * IMP_AI_DisableNs(void)
  *
  * Identical across all SoCs.
@@ -280,6 +280,10 @@ int hal_audio_enable_ns(void *ctx, rss_ns_level_t level)
         break;
     case RSS_NS_VERYHIGH:
         ns_mode = NS_VERYHIGH;
+        break;
+    case RSS_NS_MUSIC:
+        /* OpenIMP/libaudioProcess-neo extension; closed SDKs may reject it. */
+        ns_mode = 4;
         break;
     default:
         ns_mode = NS_MODERATE;
