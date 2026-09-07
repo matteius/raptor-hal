@@ -50,6 +50,23 @@ make PLATFORM=T31 info     # print resolved build config
 
 ## API Overview
 
+### V4L2 Annex-B frames
+
+The OpenIMP bridge exposes one descriptor per H.264 NAL, not one aggregate
+IDR descriptor per access unit. This lets RVD find SPS and apply its existing
+VUI correction before publishing. The aggregate representation previously
+hid SPS, leaving full-range BT.601 ISP data labelled limited BT.709 and
+causing decoder-side shadow clipping and hue shifts.
+
+Descriptors point into the retained OpenIMP packet; no video payload is
+copied. Their small array grows only when a larger NAL count is encountered.
+Start codes, byte order, packet lifetime, source timestamps and frame counter
+are unchanged. Malformed/empty/non-Annex-B access units are rejected and
+released through the normal ownership path. `sh tests/test-annexb.sh` checks
+mixed prefixes, SPS/PPS/SEI/AUD, multi-slice frames, truncation, capacity and
+byte preservation under ASan/UBSan; with a sibling raptor-common checkout it
+also verifies the actual SPS VUI dispatch and edits.
+
 The public API is a single header: `include/raptor_hal.h`. All Ingenic SDK types
 are abstracted behind `rss_*` types. The HAL exposes an operations vtable
 (`rss_hal_ops_t`) through an opaque context.

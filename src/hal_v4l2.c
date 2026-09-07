@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "hal_internal.h"
+#include "hal_h264_annexb.h"
 
 /* Prefer two buffers so the ISP can fill one while AVPU owns the other.  The
  * adapter itself keeps only one frame in flight, however, so drivers with a
@@ -118,7 +119,8 @@ struct rss_v4l2_h264 {
     uint32_t dequeued_index;
     OpenIMPAVCEncoder *encoder;
     OpenIMPAVCPacket packet;
-    rss_nal_unit_t nal;
+    rss_nal_unit_t *nals;
+    uint32_t nal_capacity;
     int streaming;
     int source_dequeued;
     int source_requeue_pending;
@@ -304,47 +306,6 @@ static int release_pending(rss_v4l2_h264_t *backend, int requeue)
         return requeue_source(backend);
     backend->source_dequeued = 0;
     return 0;
-}
-
-/*
- * The bridge contract is one complete H.264 access unit in Annex-B form.
- * RSD's SPS/PPS cache and RMR's muxer both parse start codes, so accepting
- * length-prefixed output here would fail downstream even if capture itself
- * appeared healthy. Derive keyframe state from the IDR NAL as well: this is
- * the value RVD publishes into the ring and RSD uses to release new clients.
- */
-static int classify_h264_annexb(const uint8_t *data, uint32_t length, int *is_key)
-{
-    uint32_t offset;
-    int saw_start_code = 0;
-    int saw_vcl = 0;
-
-    if (!data || !length || !is_key)
-        return -EINVAL;
-    *is_key = 0;
-    for (offset = 0; offset + 3U < length; ++offset) {
-        uint32_t nal_offset;
-        uint8_t nal_type;
-
-        if (data[offset] != 0 || data[offset + 1U] != 0)
-            continue;
-        if (data[offset + 2U] == 1U)
-            nal_offset = offset + 3U;
-        else if (offset + 4U < length && data[offset + 2U] == 0 && data[offset + 3U] == 1U)
-            nal_offset = offset + 4U;
-        else
-            continue;
-        if (nal_offset >= length)
-            continue;
-        saw_start_code = 1;
-        nal_type = data[nal_offset] & 0x1fU;
-        if (nal_type >= 1U && nal_type <= 5U)
-            saw_vcl = 1;
-        if (nal_type == 5U)
-            *is_key = 1;
-        offset = nal_offset;
-    }
-    return saw_start_code && saw_vcl ? 0 : -EPROTO;
 }
 
 int rss_v4l2_h264_create(rss_v4l2_h264_t **backend_out, const char *video_device,
@@ -551,6 +512,7 @@ void rss_v4l2_h264_destroy(rss_v4l2_h264_t *backend)
         v4l2_ioctl(backend->video_fd, VIDIOC_REQBUFS, &request);
         close(backend->video_fd);
     }
+    free(backend->nals);
     free(backend);
 }
 
@@ -683,15 +645,33 @@ int rss_v4l2_h264_poll(rss_v4l2_h264_t *backend, uint32_t timeout_ms)
 int rss_v4l2_h264_get_frame(rss_v4l2_h264_t *backend, rss_frame_t *frame)
 {
     int is_key;
+    uint32_t nal_count;
     int ret;
 
     if (!backend || !frame || !backend->packet_valid)
         return -EINVAL;
-    ret = classify_h264_annexb(backend->packet.data, backend->packet.length, &is_key);
+    /* A whole access unit labelled IDR hid its SPS/PPS from consumers such
+     * as RVD's VUI correction. Expose each NAL, retaining zero-copy packet
+     * ownership and growing only the small descriptor array when needed. */
+    ret = hal_h264_annexb_split(backend->packet.data, backend->packet.length,
+                               backend->nals, backend->nal_capacity, &nal_count, &is_key);
+    if (ret == -ENOSPC) {
+        rss_nal_unit_t *nals = NULL;
+        if ((uint64_t)nal_count * sizeof(*nals) <= SIZE_MAX)
+            nals = realloc(backend->nals, (size_t)nal_count * sizeof(*nals));
+        if (!nals) {
+            ret = -ENOMEM;
+        } else {
+            backend->nals = nals;
+            backend->nal_capacity = nal_count;
+            ret = hal_h264_annexb_split(backend->packet.data, backend->packet.length,
+                                       nals, nal_count, &nal_count, &is_key);
+        }
+    }
     if (ret) {
         int release_ret;
 
-        HAL_LOG_ERR("OpenIMP packet is not a complete Annex-B H.264 access unit");
+        HAL_LOG_ERR("cannot describe OpenIMP Annex-B H.264 access unit: %d", ret);
         release_ret = release_pending(backend, backend->streaming);
         if (release_ret)
             HAL_LOG_ERR("failed to release invalid OpenIMP packet: %d", release_ret);
@@ -703,12 +683,8 @@ int rss_v4l2_h264_get_frame(rss_v4l2_h264_t *backend, rss_frame_t *frame)
         backend->warned_key_mismatch = 1;
     }
     memset(frame, 0, sizeof(*frame));
-    backend->nal.data = backend->packet.data;
-    backend->nal.length = backend->packet.length;
-    backend->nal.type = is_key ? RSS_NAL_H264_IDR : RSS_NAL_H264_SLICE;
-    backend->nal.frame_end = true;
-    frame->nals = &backend->nal;
-    frame->nal_count = 1;
+    frame->nals = backend->nals;
+    frame->nal_count = nal_count;
     frame->codec = RSS_CODEC_H264;
     frame->timestamp = backend->packet.timestamp;
     frame->seq = backend->sequence;
