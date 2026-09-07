@@ -381,7 +381,7 @@ int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
      * Gen3: single call to GetAeExprInfo.
      * The struct layout is SoC-specific but includes:
      *   - total gain (analog * digital * isp_dgain)
-     *   - exposure time in microseconds
+     *   - exposure time with an explicit line/microsecond unit
      * AE luma is calculated separately from the 256-bin histogram below.
      */
     IMPISPAeExprInfo expr_info;
@@ -390,8 +390,13 @@ int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
     if (ret != 0)
         return ret;
 
-    exposure->exposure_time = expr_info.AeIntegrationTime;
-    exposure->valid_mask |= RSS_EXPOSURE_VALID_TIME;
+    /* The SDK can return sensor lines (including OpenIMP's T41 path).
+     * Without the active mode's line period, a line count cannot be
+     * converted to microseconds. Do not advertise it as a valid time. */
+    if (expr_info.AeIntegrationTimeUnit == ISP_CORE_EXPR_UNIT_US) {
+        exposure->exposure_time = expr_info.AeIntegrationTime;
+        exposure->valid_mask |= RSS_EXPOSURE_VALID_TIME;
+    }
 #if defined(PLATFORM_T40) || defined(PLATFORM_T41)
     /* T40/T41 AEExprInfo has TotalGainDb (read-only dB total gain) */
     exposure->total_gain = expr_info.TotalGainDb;
