@@ -283,7 +283,7 @@ struct rss_hal_ctx {
 #ifdef V4L2_OPENIMP
     /* "v4l2" backend: the capture/encode instance behind the encoder
      * ops, and the device node it opens (set before enc_create). */
-    rss_v4l2_h264_t *v4l2;
+    rss_v4l2_h264_t *v4l2[RSS_MAX_ENC_CHANNELS];
     char v4l2_device[64];
 #endif
 

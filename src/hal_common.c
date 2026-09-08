@@ -1512,7 +1512,12 @@ rss_hal_ctx_t *rss_hal_create_backend(const char *backend)
      * video library can hand out the composed table. */
     if (strcmp(backend, "v4l2") == 0) {
         ctx->ops = hal_v4l2_backend_ops();
+#if defined(PLATFORM_T41)
+        ctx->caps.single_video_channel = false;
+        ctx->caps.max_enc_channels = 3;
+#else
         ctx->caps.single_video_channel = true;
+#endif
         return ctx;
     }
 #endif

@@ -498,15 +498,21 @@ fail:
     return ret;
 }
 
-void rss_v4l2_h264_destroy(rss_v4l2_h264_t *backend)
+static int v4l2_destroy_checked(rss_v4l2_h264_t *backend)
 {
     uint32_t index;
+    int ret;
 
     if (!backend)
-        return;
-    rss_v4l2_h264_stop(backend);
-    if (backend->encoder)
-        OpenIMP_AVC_Destroy(backend->encoder);
+        return 0;
+    ret = rss_v4l2_h264_stop(backend);
+    if (ret)
+        return ret;
+    if (backend->encoder) {
+        ret = OpenIMP_AVC_Destroy(backend->encoder);
+        if (ret)
+            return ret;
+    }
     for (index = 0; index < RSS_V4L2_BUFFER_COUNT; ++index) {
         if (backend->buffers[index].address)
             munmap(backend->buffers[index].address, backend->buffers[index].length);
@@ -524,6 +530,14 @@ void rss_v4l2_h264_destroy(rss_v4l2_h264_t *backend)
     }
     free(backend->nals);
     free(backend);
+    return 0;
+}
+
+void rss_v4l2_h264_destroy(rss_v4l2_h264_t *backend)
+{
+    int ret = v4l2_destroy_checked(backend);
+    if (ret)
+        HAL_LOG_ERR("V4L2 teardown retained DMA-owned buffers: %d", ret);
 }
 
 int rss_v4l2_h264_start(rss_v4l2_h264_t *backend)
@@ -782,25 +796,72 @@ int rss_v4l2_h264_get_gop(rss_v4l2_h264_t *backend, uint32_t *gop_length)
  * without any caller-side allowlist.
  * ================================================================ */
 
+static int v4l2_channel_valid(int chn)
+{
+#if defined(PLATFORM_T41)
+    return chn >= 0 && chn < 3;
+#else
+    return chn == 0;
+#endif
+}
+
+static int v4l2_channel_device(rss_hal_ctx_t *ctx, int chn,
+                               char *path, size_t size)
+{
+    if (!chn) {
+        snprintf(path, size, "%s", ctx->v4l2_device[0]
+                 ? ctx->v4l2_device : "/dev/video0");
+        return 0;
+    }
+    /* V4L2 minors are allocated globally; video1 is not necessarily scaler1.
+     * Match the driver's stable output identity instead of adding to a minor. */
+    for (int minor = 0; minor < 64; ++minor) {
+        struct v4l2_capability cap = {0};
+        char bus[32];
+        int fd, ret;
+
+        snprintf(path, size, "/dev/video%d", minor);
+        fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        ret = v4l2_ioctl(fd, VIDIOC_QUERYCAP, &cap);
+        close(fd);
+        snprintf(bus, sizeof(bus), "platform:tx-isp-t41:ch%d", chn);
+        if (!ret && !strncmp((char *)cap.driver, "tx-isp-t41", sizeof(cap.driver)) &&
+            !strncmp((char *)cap.bus_info, bus, sizeof(cap.bus_info)))
+            return 0;
+    }
+    return -ENODEV;
+}
+
 static int v4l2_ops_enc_create_channel(void *vctx, int chn, const rss_video_config_t *cfg)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (chn != 0)
-        return RSS_ERR_NOTSUP; /* single H.264 channel */
-    if (c->v4l2)
+    char device[64];
+    int ret;
+
+    if (!v4l2_channel_valid(chn))
+        return RSS_ERR_NOTSUP;
+    if (c->v4l2[chn])
         return -EBUSY;
-    return rss_v4l2_h264_create(&c->v4l2, c->v4l2_device[0] ? c->v4l2_device : "/dev/video0", cfg);
+    ret = v4l2_channel_device(c, chn, device, sizeof(device));
+    if (ret)
+        return ret;
+    return rss_v4l2_h264_create(&c->v4l2[chn], device, cfg);
 }
 
 static int v4l2_ops_enc_destroy_channel(void *vctx, int chn)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
+    int ret;
 
-    if (chn != 0 || !c->v4l2)
+    if (!v4l2_channel_valid(chn) || !c->v4l2[chn])
         return -EINVAL;
-    rss_v4l2_h264_destroy(c->v4l2);
-    c->v4l2 = NULL;
+    ret = v4l2_destroy_checked(c->v4l2[chn]);
+    if (ret)
+        return ret;
+    c->v4l2[chn] = NULL;
     return 0;
 }
 
@@ -808,9 +869,9 @@ static int v4l2_ops_enc_destroy_channel(void *vctx, int chn)
     static int v4l2_ops_##name(void *vctx, int chn)                                                \
     {                                                                                              \
         rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;                                                  \
-        if (chn != 0 || !c->v4l2)                                                                  \
+        if (!v4l2_channel_valid(chn) || !c->v4l2[chn])                                                                  \
             return -EINVAL;                                                                        \
-        return call(c->v4l2);                                                                      \
+        return call(c->v4l2[chn]);                                                                      \
     }
 
 V4L2_OPS_WRAP(enc_start, rss_v4l2_h264_start)
@@ -821,27 +882,27 @@ static int v4l2_ops_enc_poll(void *vctx, int chn, uint32_t timeout_ms)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (chn != 0 || !c->v4l2)
+    if (!v4l2_channel_valid(chn) || !c->v4l2[chn])
         return -EINVAL;
-    return rss_v4l2_h264_poll(c->v4l2, timeout_ms);
+    return rss_v4l2_h264_poll(c->v4l2[chn], timeout_ms);
 }
 
 static int v4l2_ops_enc_get_frame(void *vctx, int chn, rss_frame_t *frame)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (chn != 0 || !c->v4l2)
+    if (!v4l2_channel_valid(chn) || !c->v4l2[chn])
         return -EINVAL;
-    return rss_v4l2_h264_get_frame(c->v4l2, frame);
+    return rss_v4l2_h264_get_frame(c->v4l2[chn], frame);
 }
 
 static int v4l2_ops_enc_release_frame(void *vctx, int chn, rss_frame_t *frame)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (chn != 0 || !c->v4l2)
+    if (!v4l2_channel_valid(chn) || !c->v4l2[chn])
         return -EINVAL;
-    return rss_v4l2_h264_release_frame(c->v4l2, frame);
+    return rss_v4l2_h264_release_frame(c->v4l2[chn], frame);
 }
 
 /* The deferred runtime controls: the setters publish atomic pending
@@ -852,36 +913,36 @@ static int v4l2_ops_enc_set_bitrate(void *vctx, int chn, uint32_t bitrate)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (chn != 0 || !c->v4l2)
+    if (!v4l2_channel_valid(chn) || !c->v4l2[chn])
         return -EINVAL;
-    return rss_v4l2_h264_set_bitrate(c->v4l2, bitrate);
+    return rss_v4l2_h264_set_bitrate(c->v4l2[chn], bitrate);
 }
 
 static int v4l2_ops_enc_get_avg_bitrate(void *vctx, int chn, uint32_t *bitrate)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (chn != 0 || !c->v4l2)
+    if (!v4l2_channel_valid(chn) || !c->v4l2[chn])
         return -EINVAL;
-    return rss_v4l2_h264_get_bitrate(c->v4l2, NULL, bitrate);
+    return rss_v4l2_h264_get_bitrate(c->v4l2[chn], NULL, bitrate);
 }
 
 static int v4l2_ops_enc_set_gop(void *vctx, int chn, uint32_t gop_length)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (chn != 0 || !c->v4l2)
+    if (!v4l2_channel_valid(chn) || !c->v4l2[chn])
         return -EINVAL;
-    return rss_v4l2_h264_set_gop(c->v4l2, gop_length);
+    return rss_v4l2_h264_set_gop(c->v4l2[chn], gop_length);
 }
 
 static int v4l2_ops_enc_get_gop_attr(void *vctx, int chn, uint32_t *gop_length)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (chn != 0 || !c->v4l2)
+    if (!v4l2_channel_valid(chn) || !c->v4l2[chn])
         return -EINVAL;
-    return rss_v4l2_h264_get_gop(c->v4l2, gop_length);
+    return rss_v4l2_h264_get_gop(c->v4l2[chn], gop_length);
 }
 
 /* The media clock this backend stamps frames with: CLOCK_MONOTONIC
@@ -906,9 +967,13 @@ static int v4l2_ops_deinit(void *vctx)
 {
     rss_hal_ctx_t *c = (rss_hal_ctx_t *)vctx;
 
-    if (c->v4l2) {
-        rss_v4l2_h264_destroy(c->v4l2);
-        c->v4l2 = NULL;
+    for (int chn = 0; chn < RSS_MAX_ENC_CHANNELS; ++chn) {
+        if (c->v4l2[chn]) {
+            int ret = v4l2_destroy_checked(c->v4l2[chn]);
+            if (ret)
+                return ret;
+            c->v4l2[chn] = NULL;
+        }
     }
     return hal_imp_ops()->deinit(vctx);
 }

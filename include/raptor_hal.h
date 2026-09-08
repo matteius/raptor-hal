@@ -737,9 +737,9 @@ int rss_v4l2_h264_get_bitrate(rss_v4l2_h264_t *backend, uint32_t *target_bitrate
 int rss_v4l2_h264_set_gop(rss_v4l2_h264_t *backend, uint32_t gop_length);
 int rss_v4l2_h264_get_gop(rss_v4l2_h264_t *backend, uint32_t *gop_length);
 
-/* "v4l2" backend only: the capture node its encoder slot opens
- * (default /dev/video0). Call between rss_hal_create_backend() and
- * enc_create_channel. */
+/* "v4l2" backend only: channel 0's capture node (default /dev/video0).
+ * T41 additional outputs are discovered by their QUERYCAP bus identities,
+ * not by assuming consecutive device minors. Call before enc_create_channel. */
 void rss_hal_v4l2_set_device(rss_hal_ctx_t *ctx, const char *device);
 
 /* ================================================================
