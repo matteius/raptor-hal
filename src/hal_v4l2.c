@@ -308,6 +308,39 @@ static int release_pending(rss_v4l2_h264_t *backend, int requeue)
     return 0;
 }
 
+static OpenIMPAVCConfig v4l2_avc_config(const rss_video_config_t *config)
+{
+    uint8_t min_qp = config->min_qp > 0 ? config->min_qp : 15;
+    uint8_t max_qp = config->max_qp > 0 ? config->max_qp : 45;
+    uint8_t initial_qp = config->init_qp > 0 ? config->init_qp : 26;
+
+    if (initial_qp < min_qp)
+        initial_qp = min_qp;
+    if (initial_qp > max_qp)
+        initial_qp = max_qp;
+    return (OpenIMPAVCConfig){
+        .width = config->width,
+        .height = config->height,
+        .fps_num = config->fps_num,
+        .fps_den = config->fps_den,
+        .bitrate = config->bitrate,
+        .gop_length = config->gop_length ? config->gop_length : config->fps_num,
+        /* Submit/Dequeue/Release is strictly serial in this adapter. Extra
+         * output slots cannot overlap encoding; they only consume reserved
+         * memory and can force later slots onto slow uncached allocations.
+         * Keep two CAPTURE buffers for ISP/AVPU overlap and honor explicit
+         * output-pool requests, but default to the one packet we can own. */
+        .stream_buffer_count = config->max_stream_cnt ? config->max_stream_cnt : 1,
+        .stream_buffer_size = config->stream_buf_size,
+        .profile = openimp_profile(config->profile),
+        .rate_control = config->rc_mode <= RSS_RC_VBR ? config->rc_mode : RSS_RC_CBR,
+        .initial_qp = initial_qp,
+        .min_qp = min_qp,
+        .max_qp = max_qp,
+        .entropy_coding = config->profile != 0,
+    };
+}
+
 int rss_v4l2_h264_create(rss_v4l2_h264_t **backend_out, const char *video_device,
                          const rss_video_config_t *config)
 {
@@ -441,30 +474,7 @@ int rss_v4l2_h264_create(rss_v4l2_h264_t **backend_out, const char *video_device
     }
 
     {
-        uint8_t min_qp = config->min_qp > 0 ? config->min_qp : 15;
-        uint8_t max_qp = config->max_qp > 0 ? config->max_qp : 45;
-        uint8_t initial_qp = config->init_qp > 0 ? config->init_qp : 26;
-
-        if (initial_qp < min_qp)
-            initial_qp = min_qp;
-        if (initial_qp > max_qp)
-            initial_qp = max_qp;
-        OpenIMPAVCConfig avc = {
-            .width = config->width,
-            .height = config->height,
-            .fps_num = config->fps_num,
-            .fps_den = config->fps_den,
-            .bitrate = config->bitrate,
-            .gop_length = config->gop_length ? config->gop_length : config->fps_num,
-            .stream_buffer_count = config->max_stream_cnt ? config->max_stream_cnt : 4,
-            .stream_buffer_size = config->stream_buf_size,
-            .profile = openimp_profile(config->profile),
-            .rate_control = config->rc_mode <= RSS_RC_VBR ? config->rc_mode : RSS_RC_CBR,
-            .initial_qp = initial_qp,
-            .min_qp = min_qp,
-            .max_qp = max_qp,
-            .entropy_coding = config->profile != 0,
-        };
+        OpenIMPAVCConfig avc = v4l2_avc_config(config);
 
         failed_index = UINT32_MAX;
         stage = "avc_create";

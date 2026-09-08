@@ -67,6 +67,15 @@ mixed prefixes, SPS/PPS/SEI/AUD, multi-slice frames, truncation, capacity and
 byte preservation under ASan/UBSan; with a sibling raptor-common checkout it
 also verifies the actual SPS VUI dispatch and edits.
 
+The synchronous V4L2 bridge defaults to one encoded-output slot, retaining
+two capture buffers so ISP capture can overlap AVPU ownership. It never
+submits another frame until the previous packet is released, so additional
+output slots do not improve throughput. Explicit `max_stream_cnt` requests
+still take precedence. On memory-constrained devices, avoiding unused slots
+also avoids periodically rotating onto an uncached allocation when reserved
+memory fills. `tests/test-v4l2-config.sh` checks this default and explicit
+overrides through the actual adapter config builder under ASan/UBSan.
+
 The public API is a single header: `include/raptor_hal.h`. All Ingenic SDK types
 are abstracted behind `rss_*` types. The HAL exposes an operations vtable
 (`rss_hal_ops_t`) through an opaque context.
